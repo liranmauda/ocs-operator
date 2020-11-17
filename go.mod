@@ -3,13 +3,13 @@ module github.com/openshift/ocs-operator
 go 1.13
 
 require (
-	github.com/RHsyseng/operator-utils v0.0.0-20190807020041-5344a0f594b8
+	github.com/RHsyseng/operator-utils v1.4.4
 	github.com/blang/semver v3.5.1+incompatible
 	github.com/coreos/prometheus-operator v0.38.0
 	github.com/ghodss/yaml v1.0.1-0.20190212211648-25d852aebe32
 	github.com/go-logr/logr v0.1.0
 	github.com/go-logr/zapr v0.1.1
-	github.com/go-openapi/spec v0.19.5
+	github.com/go-openapi/spec v0.19.6
 	github.com/kubernetes-csi/external-snapshotter/v2 v2.1.1
 	github.com/noobaa/noobaa-operator/v2 v2.3.0
 	github.com/oklog/run v1.0.0
@@ -17,7 +17,7 @@ require (
 	github.com/onsi/gomega v1.9.0
 	github.com/openshift/api v3.9.1-0.20190924102528-32369d4db2ad+incompatible
 	github.com/openshift/build-machinery-go v0.0.0-20200512074546-3744767c4131
-	github.com/openshift/client-go v0.0.0-20190923180330-3b6373338c9b
+	github.com/openshift/client-go v3.9.0+incompatible
 	github.com/openshift/custom-resource-status v0.0.0-20190812200727-7961da9a2eb7
 	github.com/operator-framework/operator-lifecycle-manager v0.0.0-20200321030439-57b580e57e88
 	github.com/operator-framework/operator-sdk v0.17.0
