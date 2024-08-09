@@ -94,6 +94,16 @@ rules:
   - update
   - watch
 - apiGroups:
+  - cluster.open-cluster-management.io
+  resources:
+  - clusterclaims
+  verbs:
+  - create
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
   - config.openshift.io
   resources:
   - clusterversions
@@ -232,6 +242,32 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - ocs.openshift.io
+  resources:
+  - storageclusterpeers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ocs.openshift.io
+  resources:
+  - storageclusterpeers/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - ocs.openshift.io
+  resources:
+  - storageclusterpeers/status
+  verbs:
+  - get
+  - patch
+  - update
 - apiGroups:
   - ocs.openshift.io
   resources:

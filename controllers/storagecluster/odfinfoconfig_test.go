@@ -7,9 +7,9 @@ import (
 	"github.com/red-hat-storage/ocs-operator/api/v4/v1alpha1"
 	"github.com/red-hat-storage/ocs-operator/v4/controllers/util"
 	ocsversion "github.com/red-hat-storage/ocs-operator/v4/version"
+	"gopkg.in/yaml.v2"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/yaml"
 
 	api "github.com/red-hat-storage/ocs-operator/api/v4/v1"
 	"gotest.tools/v3/assert"
@@ -83,7 +83,7 @@ func TestOdfInfoConfig(t *testing.T) {
 
 		configMap := &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      odfInfoConfigMapName,
+				Name:      OdfInfoConfigMapName,
 				Namespace: namespace,
 			},
 		}
@@ -127,10 +127,10 @@ func TestOdfInfoConfig(t *testing.T) {
 		}
 		// get the output
 		err = r.Client.Get(r.ctx, client.ObjectKeyFromObject(configMap), configMap)
-		assert.NilError(t, err, "expected to find configmap %q: %+v", odfInfoConfigMapName, err)
+		assert.NilError(t, err, "expected to find configmap %q: %+v", OdfInfoConfigMapName, err)
 
 		// compare with the expected results
-		odfInfoDataOfStorageClusterKey := OdfInfoData{}
+		odfInfoDataOfStorageClusterKey := v1alpha1.OdfInfoData{}
 		err = yaml.Unmarshal([]byte(configMap.Data[odfInfoConfigReconciler.getOdfInfoKeyName(sc)]),
 			&odfInfoDataOfStorageClusterKey)
 		assert.NilError(t, err, "Expected unmarshalling of OdfInfoConfig's data")

@@ -71,8 +71,7 @@ const (
 	networkProvider           = "multus"
 	publicNetworkSelectorKey  = "public"
 	clusterNetworkSelectorKey = "cluster"
-	// DisasterRecoveryTargetAnnotation signifies that the cluster is intended to be used for Disaster Recovery
-	DisasterRecoveryTargetAnnotation = "ocs.openshift.io/clusterIsDisasterRecoveryTarget"
+	upmapReadBalancerMode     = "upmap-read"
 )
 
 const (
@@ -181,26 +180,25 @@ func (obj *ocsCephCluster) ensureCreated(r *StorageClusterReconciler, sc *ocsv1.
 				// reset the KMS connection's error field,
 				// it will be anyway set if there is an error
 				sc.Status.KMSServerConnection.KMSServerConnectionError = ""
-				if kmsConfigMap.Data["KMS_PROVIDER"] == "vault" {
-					sc.Status.KMSServerConnection.KMSServerAddress = kmsConfigMap.Data["VAULT_ADDR"]
-				} else if kmsConfigMap.Data["KMS_PROVIDER"] == AzureKSMProvider {
-					sc.Status.KMSServerConnection.KMSServerAddress = kmsConfigMap.Data["AZURE_VAULT_URL"]
-				}
-				if err = reachKMSProvider(kmsConfigMap); err != nil {
+				// get the current KMS provider name
+				currKMSProvider := kmsConfigMap.Data[KMSProviderKey]
+				// according to the KMS provider, get the corresponding address/endpoint key
+				// and use it to set 'KMSServerAddress' status
+				kmsAddrssKey := kmsProviderAddressKeyMap[currKMSProvider]
+				sc.Status.KMSServerConnection.KMSServerAddress = kmsConfigMap.Data[kmsAddrssKey]
+				// if the KMS connection address is empty, log it as an error and continue
+				if sc.Status.KMSServerConnection.KMSServerAddress == "" {
+					r.Log.Error(nil, "An empty KMS server connection address found",
+						"KMSProviderName", currKMSProvider, "KMSAddressKey", kmsAddrssKey)
+				} else if err = reachKMSProvider(kmsConfigMap); err != nil {
 					sc.Status.KMSServerConnection.KMSServerConnectionError = err.Error()
 					r.Log.Error(err, "Address provided in KMS ConfigMap is not reachable.", "KMSConfigMap", klog.KRef(kmsConfigMap.Namespace, kmsConfigMap.Name))
 					return reconcile.Result{}, err
 				}
 			}
-			cephCluster, err = newCephCluster(sc, r.images.Ceph, kmsConfigMap, r.Log)
-			if err != nil {
-				return reconcile.Result{}, err
-			}
+			cephCluster = newCephCluster(sc, r.images.Ceph, kmsConfigMap, r.Log)
 		} else {
-			cephCluster, err = newCephCluster(sc, r.images.Ceph, nil, r.Log)
-			if err != nil {
-				return reconcile.Result{}, err
-			}
+			cephCluster = newCephCluster(sc, r.images.Ceph, nil, r.Log)
 		}
 	}
 
@@ -274,9 +272,8 @@ func (obj *ocsCephCluster) ensureCreated(r *StorageClusterReconciler, sc *ocsv1.
 	// Record actual Ceph container image version before attempting update
 	sc.Status.Images.Ceph.ActualImage = found.Spec.CephVersion.Image
 
-	// Allow migration of OSD to bluestore-rdr if RDR optimization annotation is added on an existing cluster.
-	// Prevent changing the bluestore-rdr settings if they are already applied in the existing ceph cluster.
-	cephCluster.Spec.Storage.Store = determineOSDStore(sc, cephCluster.Spec.Storage.Store, found.Spec.Storage.Store)
+	// Update OSD store to `bluestore`
+	cephCluster.Spec.Storage.Store = updateOSDStore(found.Spec.Storage.Store)
 
 	// Add it to the list of RelatedObjects if found
 	objectRef, err := reference.GetReference(r.Scheme, found)
@@ -411,25 +408,17 @@ func getCephClusterMonitoringLabels(sc ocsv1.StorageCluster) map[string]string {
 }
 
 // newCephCluster returns a CephCluster object.
-func newCephCluster(sc *ocsv1.StorageCluster, cephImage string, kmsConfigMap *corev1.ConfigMap, reqLogger logr.Logger) (*rookCephv1.CephCluster, error) {
+func newCephCluster(sc *ocsv1.StorageCluster, cephImage string, kmsConfigMap *corev1.ConfigMap, reqLogger logr.Logger) *rookCephv1.CephCluster {
 	labels := map[string]string{
 		"app": sc.Name,
 	}
 
-	maxLogSize, err := resource.ParseQuantity("500Mi")
-	if err != nil {
-		return &rookCephv1.CephCluster{}, fmt.Errorf("Failed to parse maxLogSize for log rotate. %v", err)
-	}
+	maxLogSize := resource.MustParse("500Mi")
 
 	logCollector := rookCephv1.LogCollectorSpec{
 		Enabled:     true,
 		Periodicity: "daily",
 		MaxLogSize:  &maxLogSize,
-	}
-
-	osdStore := getOSDStoreConfig(sc)
-	if osdStore.Type != "" {
-		reqLogger.Info("osd store settings", osdStore)
 	}
 
 	cephCluster := &rookCephv1.CephCluster{
@@ -461,8 +450,8 @@ func newCephCluster(sc *ocsv1.StorageCluster, cephImage string, kmsConfigMap *co
 				Interval: &metav1.Duration{Duration: 30 * time.Second},
 			},
 			Storage: rookCephv1.StorageScopeSpec{
+				AllowDeviceClassUpdate:       sc.Spec.ManagedResources.CephCluster.AllowDeviceClassUpdate,
 				StorageClassDeviceSets:       newStorageClassDeviceSets(sc),
-				Store:                        osdStore,
 				FlappingRestartIntervalHours: 24,
 				FullRatio:                    sc.Spec.ManagedResources.CephCluster.FullRatio,
 				NearFullRatio:                sc.Spec.ManagedResources.CephCluster.NearFullRatio,
@@ -585,7 +574,7 @@ func newCephCluster(sc *ocsv1.StorageCluster, cephImage string, kmsConfigMap *co
 	cephCluster.Spec.Security.KeyRotation.Enabled = isEnabled
 	cephCluster.Spec.Security.KeyRotation.Schedule = rotationSchedule
 
-	return cephCluster, nil
+	return cephCluster
 }
 
 func isMultus(nwSpec *rookCephv1.NetworkSpec) bool {
@@ -631,6 +620,14 @@ func newExternalCephCluster(sc *ocsv1.StorageCluster, monitoringIP, monitoringPo
 		"app": sc.Name,
 	}
 
+	maxLogSize := resource.MustParse("500Mi")
+
+	logCollector := rookCephv1.LogCollectorSpec{
+		Enabled:     true,
+		Periodicity: "daily",
+		MaxLogSize:  &maxLogSize,
+	}
+
 	var monitoringSpec = rookCephv1.MonitoringSpec{Enabled: false}
 
 	if monitoringIP != "" {
@@ -671,6 +668,7 @@ func newExternalCephCluster(sc *ocsv1.StorageCluster, monitoringIP, monitoringPo
 				rookCephv1.KeyMonitoring:   getCephClusterMonitoringLabels(*sc),
 				rookCephv1.KeyCephExporter: getCephClusterMonitoringLabels(*sc),
 			},
+			LogCollector: logCollector,
 			CSI: rookCephv1.CSIDriverSpec{
 				ReadAffinity: getReadAffinityOptions(sc),
 				CephFS: rookCephv1.CSICephFSSpec{
@@ -1101,7 +1099,7 @@ func generateMgrSpec(sc *ocsv1.StorageCluster) rookCephv1.MgrSpec {
 		AllowMultiplePerNode: statusutil.IsSingleNodeDeployment(),
 		Modules: []rookCephv1.Module{
 			{Name: "pg_autoscaler", Enabled: true},
-			{Name: "balancer", Enabled: true},
+			{Name: "balancer", Enabled: true, Settings: rookCephv1.ModuleSettings{BalancerMode: upmapReadBalancerMode}},
 		},
 	}
 
@@ -1296,45 +1294,14 @@ func getIPFamilyConfig(c client.Client) (rookCephv1.IPFamilyType, bool, error) {
 	return rookCephv1.IPv4, false, nil
 }
 
-func getOSDStoreConfig(sc *ocsv1.StorageCluster) rookCephv1.OSDStore {
-	osdStore := rookCephv1.OSDStore{}
-	if !sc.Spec.ExternalStorage.Enable && optimizeDisasterRecovery(sc) {
-		osdStore.Type = string(rookCephv1.StoreTypeBlueStoreRDR)
-	}
-
-	return osdStore
-}
-
-// optimizeDisasterRecovery returns true if any RDR optimizations are required
-func optimizeDisasterRecovery(sc *ocsv1.StorageCluster) bool {
-	if annotation, found := sc.GetAnnotations()[DisasterRecoveryTargetAnnotation]; found {
-		if annotation == "true" {
-			return true
-		}
-	}
-
-	return false
-}
-
-func determineOSDStore(sc *ocsv1.StorageCluster, newOSDStore, existingOSDStore rookCephv1.OSDStore) rookCephv1.OSDStore {
+func updateOSDStore(existingOSDStore rookCephv1.OSDStore) rookCephv1.OSDStore {
 	if existingOSDStore.Type == string(rookCephv1.StoreTypeBlueStoreRDR) {
-		return existingOSDStore
-	} else if !sc.Spec.ExternalStorage.Enable && (isBluestore(existingOSDStore) && optimizeDisasterRecovery(sc)) {
 		return rookCephv1.OSDStore{
-			Type:        string(rookCephv1.StoreTypeBlueStoreRDR),
+			Type:        string(rookCephv1.StoreTypeBlueStore),
 			UpdateStore: "yes-really-update-store",
 		}
 	}
-
-	return newOSDStore
-}
-
-func isBluestore(store rookCephv1.OSDStore) bool {
-	if store.Type == string(rookCephv1.StoreTypeBlueStore) || store.Type == "" {
-		return true
-	}
-
-	return false
+	return existingOSDStore
 }
 
 func getOsdCount(sc *ocsv1.StorageCluster) int {

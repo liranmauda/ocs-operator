@@ -2,7 +2,6 @@ package storagecluster
 
 import (
 	"fmt"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"strings"
 	"sync"
 
@@ -10,33 +9,15 @@ import (
 	ocsv1 "github.com/red-hat-storage/ocs-operator/api/v4/v1"
 	ocsv1a1 "github.com/red-hat-storage/ocs-operator/api/v4/v1alpha1"
 	"github.com/red-hat-storage/ocs-operator/v4/controllers/util"
+	"gopkg.in/yaml.v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/yaml"
 )
-
-type connectedClient struct {
-	Name      string `yaml:"name"`
-	ClusterID string `yaml:"clusterId"`
-}
-type infoStorageCluster struct {
-	NamespacedName          types.NamespacedName `yaml:"namespacedName"`
-	StorageProviderEndpoint string               `yaml:"storageProviderEndpoint"`
-	CephClusterFSID         string               `yaml:"cephClusterFSID"`
-}
-
-type OdfInfoData struct {
-	Version           string             `yaml:"version"`
-	DeploymentType    string             `yaml:"deploymentType"`
-	Clients           []connectedClient  `yaml:"clients"`
-	StorageCluster    infoStorageCluster `yaml:"storageCluster"`
-	StorageSystemName string             `yaml:"storageSystemName"`
-}
 
 const (
 	odfInfoKeySuffix          = "config.yaml"
@@ -45,7 +26,7 @@ const (
 	rookCephMonSecretName     = "rook-ceph-mon"
 	fsidKey                   = "fsid"
 	ocsOperatorNamePrefix     = "ocs-operator"
-	odfInfoConfigMapName      = "odf-info"
+	OdfInfoConfigMapName      = "odf-info"
 	odfInfoMapKind            = "ConfigMap"
 )
 
@@ -65,7 +46,7 @@ func (obj *odfInfoConfig) ensureCreated(r *StorageClusterReconciler, storageClus
 
 	odfInfoConfigMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      odfInfoConfigMapName,
+			Name:      OdfInfoConfigMapName,
 			Namespace: operatorNamespace,
 		},
 	}
@@ -110,7 +91,7 @@ func (obj *odfInfoConfig) ensureDeleted(r *StorageClusterReconciler, storageClus
 		return reconcile.Result{}, err
 	}
 	odfInfoConfigMap := &corev1.ConfigMap{}
-	odfInfoConfigMap.Name = odfInfoConfigMapName
+	odfInfoConfigMap.Name = OdfInfoConfigMapName
 	odfInfoConfigMap.Namespace = operatorNamespace
 	if err = r.Client.Get(r.ctx, client.ObjectKeyFromObject(odfInfoConfigMap), odfInfoConfigMap); err != nil {
 		if errors.IsNotFound(err) {
@@ -138,7 +119,7 @@ func (obj *odfInfoConfig) ensureDeleted(r *StorageClusterReconciler, storageClus
 }
 
 func getOdfInfoData(r *StorageClusterReconciler, storageCluster *ocsv1.StorageCluster) (string, error) {
-	ocsVersion, err := getOcsVersion(r, storageCluster)
+	ocsVersion, err := getOcsVersion(r)
 	if err != nil {
 		return "", err
 	}
@@ -161,12 +142,12 @@ func getOdfInfoData(r *StorageClusterReconciler, storageCluster *ocsv1.StorageCl
 		return "", err
 	}
 
-	data := OdfInfoData{
+	data := ocsv1a1.OdfInfoData{
 		Version:           ocsVersion,
 		DeploymentType:    odfDeploymentType,
 		StorageSystemName: storageSystemName,
 		Clients:           connectedClients,
-		StorageCluster: infoStorageCluster{
+		StorageCluster: ocsv1a1.InfoStorageCluster{
 			NamespacedName:          client.ObjectKeyFromObject(storageCluster),
 			StorageProviderEndpoint: storageCluster.Status.StorageProviderEndpoint,
 			CephClusterFSID:         cephFSId,
@@ -180,19 +161,19 @@ func getOdfInfoData(r *StorageClusterReconciler, storageCluster *ocsv1.StorageCl
 
 }
 
-func getConnectedClients(r *StorageClusterReconciler, storageCluster *ocsv1.StorageCluster) ([]connectedClient, error) {
+func getConnectedClients(r *StorageClusterReconciler, storageCluster *ocsv1.StorageCluster) ([]ocsv1a1.ConnectedClient, error) {
 	storageConsumers := &ocsv1a1.StorageConsumerList{}
 	err := r.Client.List(r.ctx, storageConsumers, client.InNamespace(storageCluster.Namespace))
 	if err != nil {
 		return nil, err
 	}
-	connectedClients := make([]connectedClient, 0, len(storageConsumers.Items))
+	connectedClients := make([]ocsv1a1.ConnectedClient, 0, len(storageConsumers.Items))
 
 	for storageConsumerIdx := range storageConsumers.Items {
 		storageConsumer := &storageConsumers.Items[storageConsumerIdx]
 		clusterID := storageConsumer.Status.Client.ClusterID
 		name := storageConsumer.Status.Client.Name
-		newConnectedClient := connectedClient{
+		newConnectedClient := ocsv1a1.ConnectedClient{
 			Name:      name,
 			ClusterID: clusterID,
 		}
@@ -218,9 +199,9 @@ func getStorageSystemName(storageCluster *ocsv1.StorageCluster) (string, error) 
 
 }
 
-func getOcsVersion(r *StorageClusterReconciler, storageCluster *ocsv1.StorageCluster) (string, error) {
+func getOcsVersion(r *StorageClusterReconciler) (string, error) {
 	var csvs operatorsv1alpha1.ClusterServiceVersionList
-	err := r.Client.List(r.ctx, &csvs, client.InNamespace(storageCluster.Namespace))
+	err := r.Client.List(r.ctx, &csvs, client.InNamespace(r.OperatorNamespace))
 	if err != nil {
 		return "", err
 	}

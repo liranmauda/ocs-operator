@@ -222,6 +222,7 @@ func initStorageClusterResourceCreateUpdateTestProviderMode(t *testing.T, runtim
 		addedRuntimeObjects := []runtime.Object{node, service, deployment, secret, clientConfigMap}
 		rtObjsToCreateReconciler = append(rtObjsToCreateReconciler, addedRuntimeObjects...)
 
+		util.AddAnnotation(cr, "ocs.openshift.io/deployment-mode", "provider")
 	}
 
 	// Unpacks StorageProfile list to runtime objects array
@@ -356,6 +357,8 @@ func createFakeInitializationStorageClusterReconciler(t *testing.T, obj ...runti
 			Phase: cephv1.ConditionType(util.PhaseReady),
 		},
 	}
+
+	operatorNamespace := os.Getenv("OPERATOR_NAMESPACE")
 	verOcs, err := semver.Make(ocsversion.Version)
 	if err != nil {
 		panic(err)
@@ -363,7 +366,7 @@ func createFakeInitializationStorageClusterReconciler(t *testing.T, obj ...runti
 	csv := &opv1a1.ClusterServiceVersion{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("ocs-operator-%s", sc.Name),
-			Namespace: sc.Namespace,
+			Namespace: operatorNamespace,
 		},
 		Spec: opv1a1.ClusterServiceVersionSpec{
 			Version: oprverion.OperatorVersion{Version: verOcs},

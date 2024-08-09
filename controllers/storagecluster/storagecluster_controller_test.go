@@ -1248,7 +1248,6 @@ func createFakeScheme(t *testing.T) *runtime.Scheme {
 	if err != nil {
 		assert.Fail(t, "unable to add opv1a1 to scheme")
 	}
-
 	return scheme
 }
 
@@ -1326,9 +1325,8 @@ func TestStorageClusterOnMultus(t *testing.T) {
 
 func assertCephClusterNetwork(t assert.TestingT, reconciler StorageClusterReconciler, cr *api.StorageCluster, request reconcile.Request) {
 	request.Name = "ocsinit-cephcluster"
-	cephCluster, err := newCephCluster(cr, "", nil, log)
-	assert.NoError(t, err)
-	err = reconciler.Client.Get(context.TODO(), request.NamespacedName, cephCluster)
+	cephCluster := newCephCluster(cr, "", nil, log)
+	err := reconciler.Client.Get(context.TODO(), request.NamespacedName, cephCluster)
 	assert.NoError(t, err)
 	if cr.Spec.Network == nil {
 		assert.Equal(t, "", cephCluster.Spec.Network.Provider)

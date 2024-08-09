@@ -11,12 +11,14 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"math"
 	"net"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/blang/semver/v4"
+	quotav1 "github.com/openshift/api/quota/v1"
 	"github.com/red-hat-storage/ocs-operator/api/v4/v1alpha1"
 	ocsv1alpha1 "github.com/red-hat-storage/ocs-operator/api/v4/v1alpha1"
 	controllers "github.com/red-hat-storage/ocs-operator/v4/controllers/storageconsumer"
@@ -24,6 +26,8 @@ import (
 	pb "github.com/red-hat-storage/ocs-operator/v4/services/provider/pb"
 	ocsVersion "github.com/red-hat-storage/ocs-operator/v4/version"
 	rookCephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	opv1a1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 	"github.com/red-hat-storage/ocs-operator/v4/services"
@@ -106,12 +110,13 @@ func (s *OCSProviderServer) OnboardConsumer(ctx context.Context, req *pb.Onboard
 		return nil, status.Errorf(codes.Internal, "failed to get public key to validate onboarding ticket for consumer %q. %v", req.ConsumerName, err)
 	}
 
-	if err := validateTicket(req.OnboardingTicket, pubKey); err != nil {
+	onboardingTicket, err := decodeAndValidateTicket(req.OnboardingTicket, pubKey)
+	if err != nil {
 		klog.Errorf("failed to validate onboarding ticket for consumer %q. %v", req.ConsumerName, err)
 		return nil, status.Errorf(codes.InvalidArgument, "onboarding ticket is not valid. %v", err)
 	}
 
-	storageConsumerUUID, err := s.consumerManager.Create(ctx, req)
+	storageConsumerUUID, err := s.consumerManager.Create(ctx, req, int(onboardingTicket.StorageQuotaInGiB))
 	if err != nil {
 		if !kerrors.IsAlreadyExists(err) && err != errTicketAlreadyExists {
 			return nil, status.Errorf(codes.Internal, "failed to create storageConsumer %q. %v", req.ConsumerName, err)
@@ -367,6 +372,34 @@ func (s *OCSProviderServer) getExternalResources(ctx context.Context, consumerRe
 		}),
 	})
 
+	if consumerResource.Spec.StorageQuotaInGiB > 0 {
+		clusterResourceQuotaSpec := &quotav1.ClusterResourceQuotaSpec{
+			Selector: quotav1.ClusterResourceQuotaSelector{
+				LabelSelector: &metav1.LabelSelector{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
+						{
+							Key:      string(consumerResource.UID),
+							Operator: metav1.LabelSelectorOpDoesNotExist,
+						},
+					},
+				},
+			},
+			Quota: corev1.ResourceQuotaSpec{
+				Hard: corev1.ResourceList{"requests.storage": *resource.NewScaledQuantity(
+					int64(consumerResource.Spec.StorageQuotaInGiB),
+					resource.Giga,
+				)},
+			},
+		}
+
+		extR = append(extR, &pb.ExternalResource{
+			Name: "QuotaForConsumer",
+			Kind: "ClusterResourceQuota",
+			Data: mustMarshal(clusterResourceQuotaSpec),
+		})
+
+	}
+
 	return extR, nil
 }
 
@@ -418,13 +451,14 @@ func (s *OCSProviderServer) getOnboardingValidationKey(ctx context.Context) (*rs
 	return publicKey, nil
 }
 
-func mustMarshal(data map[string]string) []byte {
-	newData, err := json.Marshal(data)
+func mustMarshal[T any](value T) []byte {
+	newData, err := json.Marshal(value)
 	if err != nil {
 		panic("failed to marshal")
 	}
 	return newData
 }
+
 func getSubVolumeGroupClusterID(subVolumeGroup *rookCephv1.CephFilesystemSubVolumeGroup) string {
 	str := fmt.Sprintf(
 		"%s-%s-file-%s",
@@ -436,41 +470,45 @@ func getSubVolumeGroupClusterID(subVolumeGroup *rookCephv1.CephFilesystemSubVolu
 	return hex.EncodeToString(hash[:16])
 }
 
-func validateTicket(ticket string, pubKey *rsa.PublicKey) error {
+func decodeAndValidateTicket(ticket string, pubKey *rsa.PublicKey) (*services.OnboardingTicket, error) {
 	ticketArr := strings.Split(string(ticket), ".")
 	if len(ticketArr) != 2 {
-		return fmt.Errorf("invalid ticket")
+		return nil, fmt.Errorf("invalid ticket")
 	}
 
 	message, err := base64.StdEncoding.DecodeString(ticketArr[0])
 	if err != nil {
-		return fmt.Errorf("failed to decode onboarding ticket: %v", err)
+		return nil, fmt.Errorf("failed to decode onboarding ticket: %v", err)
 	}
 
 	var ticketData services.OnboardingTicket
 	err = json.Unmarshal(message, &ticketData)
 	if err != nil {
-		return fmt.Errorf("failed to unmarshal onboarding ticket message. %v", err)
+		return nil, fmt.Errorf("failed to unmarshal onboarding ticket message. %v", err)
+	}
+
+	if ticketData.StorageQuotaInGiB > math.MaxInt {
+		return nil, fmt.Errorf("invalid value sent in onboarding ticket, storage quota should be greater than 0 and less than %v: %v", math.MaxInt, ticketData.StorageQuotaInGiB)
 	}
 
 	signature, err := base64.StdEncoding.DecodeString(ticketArr[1])
 	if err != nil {
-		return fmt.Errorf("failed to decode onboarding ticket %s signature: %v", ticketData.ID, err)
+		return nil, fmt.Errorf("failed to decode onboarding ticket %s signature: %v", ticketData.ID, err)
 	}
 
 	hash := sha256.Sum256(message)
 	err = rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, hash[:], signature)
 	if err != nil {
-		return fmt.Errorf("failed to verify onboarding ticket signature. %v", err)
+		return nil, fmt.Errorf("failed to verify onboarding ticket signature. %v", err)
 	}
 
 	if ticketData.ExpirationDate < time.Now().Unix() {
-		return fmt.Errorf("onboarding ticket %s is expired", ticketData.ID)
+		return nil, fmt.Errorf("onboarding ticket %s is expired", ticketData.ID)
 	}
 
 	klog.Infof("onboarding ticket %s has been verified successfully", ticketData.ID)
 
-	return nil
+	return &ticketData, nil
 }
 
 // FulfillStorageClaim RPC call to create the StorageClaim CR on
@@ -611,19 +649,24 @@ func (s *OCSProviderServer) GetStorageClaimConfig(ctx context.Context, req *pb.S
 				rbdStorageClassData["encryptionKMSID"] = storageRequest.Spec.EncryptionMethod
 			}
 
-			extR = append(extR, &pb.ExternalResource{
-				Name: "ceph-rbd",
-				Kind: "StorageClass",
-				Data: mustMarshal(rbdStorageClassData),
-			})
-
-			extR = append(extR, &pb.ExternalResource{
-				Name: "ceph-rbd",
-				Kind: "VolumeSnapshotClass",
-				Data: mustMarshal(map[string]string{
-					"clusterID": rbdStorageClassData["clusterID"],
-					"csi.storage.k8s.io/snapshotter-secret-name": provisionerSecretName,
-				})})
+			extR = append(extR,
+				&pb.ExternalResource{
+					Name: "ceph-rbd",
+					Kind: "StorageClass",
+					Data: mustMarshal(rbdStorageClassData),
+				},
+				&pb.ExternalResource{
+					Name: "ceph-rbd",
+					Kind: "VolumeSnapshotClass",
+					Data: mustMarshal(map[string]string{
+						"csi.storage.k8s.io/snapshotter-secret-name": provisionerSecretName,
+					})},
+				&pb.ExternalResource{
+					Name: "ceph-rbd",
+					Kind: "VolumeGroupSnapshotClass",
+					Data: mustMarshal(map[string]string{
+						"csi.storage.k8s.io/group-snapshotter-secret-name": provisionerSecretName,
+					})})
 
 		case "CephFilesystemSubVolumeGroup":
 			subVolumeGroup := &rookCephv1.CephFilesystemSubVolumeGroup{}
@@ -644,26 +687,30 @@ func (s *OCSProviderServer) GetStorageClaimConfig(ctx context.Context, req *pb.S
 				"csi.storage.k8s.io/controller-expand-secret-name": provisionerSecretName,
 			}
 
-			extR = append(extR, &pb.ExternalResource{
-				Name: "cephfs",
-				Kind: "StorageClass",
-				Data: mustMarshal(cephfsStorageClassData),
-			})
-
-			extR = append(extR, &pb.ExternalResource{
-				Name: cephRes.Name,
-				Kind: cephRes.Kind,
-				Data: mustMarshal(map[string]string{
-					"filesystemName": subVolumeGroup.Spec.FilesystemName,
-				})})
-
-			extR = append(extR, &pb.ExternalResource{
-				Name: "cephfs",
-				Kind: "VolumeSnapshotClass",
-				Data: mustMarshal(map[string]string{
-					"clusterID": getSubVolumeGroupClusterID(subVolumeGroup),
-					"csi.storage.k8s.io/snapshotter-secret-name": provisionerSecretName,
-				})})
+			extR = append(extR,
+				&pb.ExternalResource{
+					Name: "cephfs",
+					Kind: "StorageClass",
+					Data: mustMarshal(cephfsStorageClassData),
+				},
+				&pb.ExternalResource{
+					Name: cephRes.Name,
+					Kind: cephRes.Kind,
+					Data: mustMarshal(map[string]string{
+						"filesystemName": subVolumeGroup.Spec.FilesystemName,
+					})},
+				&pb.ExternalResource{
+					Name: "cephfs",
+					Kind: "VolumeSnapshotClass",
+					Data: mustMarshal(map[string]string{
+						"csi.storage.k8s.io/snapshotter-secret-name": provisionerSecretName,
+					})},
+				&pb.ExternalResource{
+					Name: "cephfs",
+					Kind: "VolumeGroupSnapshotClass",
+					Data: mustMarshal(map[string]string{
+						"csi.storage.k8s.io/group-snapshotter-secret-name": provisionerSecretName,
+					})})
 		}
 	}
 
